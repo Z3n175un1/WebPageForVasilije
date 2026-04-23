@@ -35,6 +35,9 @@ logs/
 *.bak
 *.tmp
 
+# Archivos de configuracion
+config.php
+
 # Específicos del Proyecto
 transporte-frontend-old/
 # ./transporte-frontend  # (Descomentar si solo quieres subir el código PHP al repo)
