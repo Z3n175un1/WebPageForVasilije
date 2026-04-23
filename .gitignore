@@ -1,0 +1,7 @@
+./database
+./.env
+./docs
+./scratch
+./tmp
+./transporte-frontend
+./transporte-frontend-old
