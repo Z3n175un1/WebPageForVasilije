@@ -1,7 +1,45 @@
-./database
-./.env
-./docs
-./scratch
-./tmp
-./transporte-frontend
-./transporte-frontend-old
+# Entorno y Sensibles
+.env
+.env.local
+.env.*.local
+database/
+scratch/
+tmp/
+
+# Dependencias
+node_modules/
+vendor/
+dist/
+.angular/
+
+# IDE y Editores
+.vscode/
+.idea/
+*.swp
+*.swo
+.project
+.settings/
+.classpath
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs y Temporales
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+*.bak
+*.tmp
+
+# Específicos del Proyecto
+transporte-frontend-old/
+# ./transporte-frontend  # (Descomentar si solo quieres subir el código PHP al repo)
+
+# Seguridad
+# Evitar subir dumps de bases de datos accidentales
+*.sql
+!database/normalization.sql # Permitir este script específico si es necesario
