@@ -1,0 +1,67 @@
+# .htaccess - Configuración principal
+<IfModule mod_rewrite.c>
+    Options -MultiViews
+    RewriteEngine On
+    
+    # Forzar HTTPS (descomentar cuando tengas SSL)
+    # RewriteCond %{HTTPS} off
+    # RewriteRule ^(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]
+    
+    # Redirigir www a no-www
+    RewriteCond %{HTTP_HOST} ^www\.(.*)$ [NC]
+    RewriteRule ^(.*)$ http://%1/$1 [R=301,L]
+    
+    # Permitir acceso a auth/login.php
+    RewriteRule ^auth/login\.php$ - [L]
+    
+    # Rutas API — debe estar ANTES de la regla catch-all
+    RewriteRule ^api/(.*)$ api/api.php [QSA,L]
+    
+    # Redirigir la raíz a public/web.php
+    RewriteRule ^$ public/web.php [L]
+    
+    # Si el archivo o directorio existe, servirlo directamente
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+    
+    # Redirigir todo lo demás a public/web.php
+    RewriteRule ^(.*)$ public/web.php [QSA,L]
+</IfModule>
+
+# Proteger archivos sensibles
+<FilesMatch "^(config\.php|\.env|\.htaccess|composer\.json|composer\.lock)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Bloquear listado de directorios
+Options -Indexes
+
+# Compresión GZIP
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css text/javascript application/javascript application/json
+</IfModule>
+
+# Caché de archivos estáticos
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType image/jpg "access plus 1 year"
+    ExpiresByType image/jpeg "access plus 1 year"
+    ExpiresByType image/gif "access plus 1 year"
+    ExpiresByType image/png "access plus 1 year"
+    ExpiresByType text/css "access plus 1 month"
+    ExpiresByType application/javascript "access plus 1 month"
+</IfModule>
+
+# Seguridad headers
+<IfModule mod_headers.c>
+    Header set X-Content-Type-Options "nosniff"
+    Header set X-Frame-Options "SAMEORIGIN"
+    Header set X-XSS-Protection "1; mode=block"
+</IfModule>
+
+# Errores personalizados
+ErrorDocument 404 /error/404.html
+ErrorDocument 500 /error/503.html
+ErrorDocument 503 /error/maintenance.php

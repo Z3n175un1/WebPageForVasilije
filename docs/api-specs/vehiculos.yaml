@@ -1,0 +1,53 @@
+# docs/api-specs/vehiculos.yaml
+openapi: 3.0.0
+info:
+  title: API de Vehículos
+  version: 1.0.0
+paths:
+  /api/vehiculos:
+    get:
+      summary: Listar vehículos
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: busqueda
+          in: query
+          schema:
+            type: string
+        - name: filtro_estado
+          in: query
+          schema:
+            type: string
+            enum: [todos, Activo, Vendido]
+    post:
+      summary: Crear vehículo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                placa:
+                  type: string
+                tipo_vehiculo:
+                  type: string
+                marca:
+                  type: string
+                modelo:
+                  type: string
+                año:
+                  type: integer
+                color:
+                  type: string
+                estado:
+                  type: string
+  /api/vehiculos/{id}:
+    get:
+      summary: Obtener vehículo por ID
+    put:
+      summary: Actualizar vehículo
+    delete:
+      summary: Eliminar (marcar como vendido) vehículo
