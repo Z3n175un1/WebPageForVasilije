@@ -1,0 +1,31 @@
+# Git
+.git
+.gitignore
+
+# Node / Angular
+node_modules
+transporte-frontend/node_modules
+transporte-frontend/.angular
+transporte-frontend/dist
+
+# PHP / Composer
+vendor
+
+# Entorno y Sensibles
+.env
+database/
+scratch/
+tmp/
+*.sql
+*.log
+
+# Docker
+dockerfile
+docker-compose.yml
+.dockerignore
+
+# Otros
+transporte-frontend-old/
+docs/
+LICENSE
+README.md

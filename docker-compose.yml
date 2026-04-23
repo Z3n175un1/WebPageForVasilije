@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  # Aplicación (Backend PHP + Frontend Angular)
+  app:
+    build:
+      context: .
+      dockerfile: dockerfile
+    container_name: transporte-app
+    ports:
+      - "8080:80"
+    environment:
+      - DB_HOST=db
+      - DB_USERNAME=postgres
+      - DB_PASSWORD=secretpassword
+      - DB_DATABASE=transporte_db
+      - DB_PORT=5432
+      - APP_ENV=production
+    depends_on:
+      - db
+    networks:
+      - transporte-network
+
+  # Base de Datos (PostgreSQL)
+  db:
+    image: postgres:15-alpine
+    container_name: transporte-db
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=secretpassword
+      - POSTGRES_DB=transporte_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      # Puedes mapear tu script de normalización para que se ejecute al inicio
+      - ./database/normalization.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - transporte-network
+
+networks:
+  transporte-network:
+    driver: bridge
+
+volumes:
+  db-data:

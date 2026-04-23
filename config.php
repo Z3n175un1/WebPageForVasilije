@@ -26,12 +26,12 @@ define('ENVIRONMENT', getenv('APP_ENV') ?: 'development'); // development, produ
 // =============================================
 // CONFIGURACIÓN DE LA BASE DE DATOS
 // =============================================
-define('DB_HOST', getenv('DB_HOST') ?: '127.0.0.1');
-define('DB_USER', getenv('DB_USERNAME') ?: 'postgres');
+define('DB_HOST', getenv('DB_HOST') ?: '');
+define('DB_USER', getenv('DB_USERNAME') ?: '');
 define('DB_PASS', getenv('DB_PASSWORD') ?: '');
-define('DB_NAME', getenv('DB_DATABASE') ?: 'NewTransporte');
+define('DB_NAME', getenv('DB_DATABASE') ?: '');
 define('DB_PORT', getenv('DB_PORT') ?: 5432);
-define('DB_SCHEMA', getenv('DB_SCHEMA') ?: 'global');
+define('DB_SCHEMA', getenv('DB_SCHEMA') ?: 'public');
 define('DB_DRIVER', getenv('DB_DRIVER') ?: 'pgsql');
 define('DB_CHARSET', 'utf8');
 

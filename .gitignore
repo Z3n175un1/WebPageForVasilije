@@ -35,8 +35,7 @@ logs/
 *.bak
 *.tmp
 
-# Archivos de configuracion
-config.php
+# config.php # (No ignorar para permitir la carga de .env en otros entornos)
 
 # Específicos del Proyecto
 transporte-frontend-old/
