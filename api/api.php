@@ -130,15 +130,16 @@ class API {
 
         if (isset($handlers[$base])) {
             $method = $handlers[$base];
+            // Pasar $parts a los handlers si es necesario
             if ($base === 'reportes' && ($parts[1] ?? '') === 'filtro') return $this->handleFiltroReportes();
-            return $this->$method();
+            return $this->$method($parts);
         }
 
         throw new Exception("Endpoint '$this->endpoint' no encontrado", 404);
     }
 
-    private function handleAuth(): array {
-        $sub = explode('/', $this->endpoint)[1] ?? '';
+    private function handleAuth(array $parts = []): array {
+        $sub = $parts[1] ?? '';
         if ($sub === 'login') return $this->handleLogin();
         if ($sub === 'me') return $this->getCurrentUser();
         if ($sub === 'logout') return $this->handleLogout();
@@ -148,7 +149,7 @@ class API {
     // ================================================================
     // DASHBOARD STATS
     // ================================================================
-    private function getDashboardStats(): array {
+    private function getDashboardStats(array $parts = []): array {
         // Vehículos
         $stmtV = $this->pdo->query("SELECT COUNT(*) as total,
             SUM(CASE WHEN estado = 1 THEN 1 ELSE 0 END) as activos,
@@ -226,7 +227,7 @@ class API {
     // ================================================================
     // VEHÍCULOS
     // ================================================================
-    private function handleVehiculos(): array {
+    private function handleVehiculos(array $parts = []): array {
         $id = $this->params['id'] ?? null;
         switch ($this->method) {
             case 'GET':  return $id ? $this->obtenerVehiculoPorId((int)$id) : $this->listarVehiculos();
@@ -324,6 +325,7 @@ class API {
         }
 
         $idp = (int)($this->input['id_personal'] ?? 0);
+        $conductor = $this->input['conductor'] ?? null;
         
         if ($idp) {
             // Verificar si el chofer ya está asignado a otra unidad
@@ -441,7 +443,7 @@ class API {
     // ================================================================
     // GASTOS
     // ================================================================
-    private function handleGastos(): array {
+    private function handleGastos(array $parts = []): array {
         $id = $this->params['id'] ?? null;
         switch ($this->method) {
             case 'GET':    return $id ? $this->obtenerGastoPorId((int)$id) : $this->listarGastos();
@@ -454,9 +456,12 @@ class API {
 
     private function obtenerGastoPorId(int $id): array {
         $stmt = $this->pdo->prepare("
-            SELECT g.*, v.placa_vehiculo
+            SELECT g.*, v.placa_vehiculo,
+                   cd.galones, cd.precio_por_galon, cd.tipo_carburante, 
+                   cd.estacion_servicio, cd.kilometraje_actual, cd.kilometraje_anterior
             FROM global.gastos g
             LEFT JOIN global.vehiculos v ON g.id_vehiculo = v.id_vehiculo
+            LEFT JOIN global.combustible_detalle cd ON g.id_gasto = cd.id_gasto
             WHERE g.id_gasto = :id
         ");
         $stmt->execute([':id' => $id]);
@@ -469,52 +474,84 @@ class API {
         $id = (int)($this->params['id'] ?? 0);
         if (!$id) throw new Exception('ID requerido', 400);
 
-        $stmt = $this->pdo->prepare("
-            UPDATE global.gastos SET
-                id_vehiculo = :id_vehiculo,
-                tipo_gasto = :tipo_gasto,
-                concepto = :concepto,
-                descripcion = :descripcion,
-                monto = :monto,
-                cantidad = :cantidad,
-                tipo_combustible = :tipo_combustible,
-                kilometraje = :kilometraje,
-                caseta = :caseta,
-                ruta = :ruta,
-                taller = :taller,
-                tipo_mantenimiento = :tipo_mantenimiento,
-                fecha_gasto = :fecha_gasto,
-                comprobante = :comprobante,
-                proveedor = :proveedor,
-                estado_pago = :estado_pago,
-                tipo_pago = :tipo_pago,
-                observaciones = :observaciones,
-                fecha_actualizacion = CURRENT_TIMESTAMP
-            WHERE id_gasto = :id
-        ");
-        $stmt->execute([
-            ':id'                => $id,
-            ':id_vehiculo'       => (int)$this->input['id_vehiculo'],
-            ':tipo_gasto'        => $this->input['tipo_gasto'],
-            ':concepto'          => $this->input['concepto'],
-            ':descripcion'       => $this->input['descripcion'] ?? null,
-            ':monto'             => (float)$this->input['monto'],
-            ':cantidad'          => $this->input['cantidad'] ?? 1,
-            ':tipo_combustible'  => $this->input['tipo_combustible'] ?? null,
-            ':kilometraje'       => $this->input['kilometraje'] ?? null,
-            ':caseta'            => $this->input['caseta'] ?? null,
-            ':ruta'              => $this->input['ruta'] ?? null,
-            ':taller'            => $this->input['taller'] ?? null,
-            ':tipo_mantenimiento'=> $this->input['tipo_mantenimiento'] ?? null,
-            ':fecha_gasto'       => $this->input['fecha_gasto'],
-            ':comprobante'       => $this->input['comprobante'] ?? null,
-            ':proveedor'         => $this->input['proveedor'] ?? null,
-            ':estado_pago'       => $this->input['estado_pago'] ?? 'Pagado',
-            ':tipo_pago'         => $this->input['tipo_pago'] ?? 'Efectivo',
-            ':observaciones'     => $this->input['observaciones'] ?? null,
-        ]);
+        $this->pdo->beginTransaction();
+        try {
+            $stmt = $this->pdo->prepare("
+                UPDATE global.gastos SET
+                    id_vehiculo = :id_vehiculo,
+                    tipo_gasto = :tipo_gasto,
+                    concepto = :concepto,
+                    descripcion = :descripcion,
+                    monto = :monto,
+                    cantidad = :cantidad,
+                    tipo_combustible = :tipo_combustible,
+                    kilometraje = :kilometraje,
+                    caseta = :caseta,
+                    ruta = :ruta,
+                    taller = :taller,
+                    tipo_mantenimiento = :tipo_mantenimiento,
+                    fecha_gasto = :fecha_gasto,
+                    comprobante = :comprobante,
+                    proveedor = :proveedor,
+                    id_proveedor = :id_proveedor,
+                    estado_pago = :estado_pago,
+                    tipo_pago = :tipo_pago,
+                    observaciones = :observaciones,
+                    fecha_actualizacion = CURRENT_TIMESTAMP
+                WHERE id_gasto = :id
+            ");
+            $stmt->execute([
+                ':id'                => $id,
+                ':id_vehiculo'       => (int)$this->input['id_vehiculo'],
+                ':tipo_gasto'        => $this->input['tipo_gasto'],
+                ':concepto'          => $this->input['concepto'],
+                ':descripcion'       => $this->input['descripcion'] ?? null,
+                ':monto'             => (float)$this->input['monto'],
+                ':cantidad'          => $this->input['cantidad'] ?? 1,
+                ':tipo_combustible'  => $this->input['tipo_combustible'] ?? null,
+                ':kilometraje'       => $this->input['kilometraje'] ?? null,
+                ':caseta'            => $this->input['caseta'] ?? null,
+                ':ruta'              => $this->input['ruta'] ?? null,
+                ':taller'            => $this->input['taller'] ?? null,
+                ':tipo_mantenimiento'=> $this->input['tipo_mantenimiento'] ?? null,
+                ':fecha_gasto'       => $this->input['fecha_gasto'],
+                ':comprobante'       => $this->input['comprobante'] ?? null,
+                ':proveedor'         => $this->input['proveedor'] ?? null,
+                ':id_proveedor'      => (int)($this->input['id_proveedor'] ?? null) ?: null,
+                ':estado_pago'       => $this->input['estado_pago'] ?? 'Pagado',
+                ':tipo_pago'         => $this->input['tipo_pago'] ?? 'Efectivo',
+                ':observaciones'     => $this->input['observaciones'] ?? null,
+            ]);
 
-        return ['success' => true, 'message' => 'Gasto actualizado exitosamente'];
+            if ($this->input['tipo_gasto'] === 'Combustible') {
+                $stmtDel = $this->pdo->prepare("DELETE FROM global.combustible_detalle WHERE id_gasto = :id");
+                $stmtDel->execute([':id' => $id]);
+
+                if (!empty($this->input['galones'])) {
+                    $stmtDet = $this->pdo->prepare("
+                        INSERT INTO global.combustible_detalle
+                        (id_gasto, tipo_carburante, galones, precio_por_galon, estacion_servicio,
+                         kilometraje_actual, kilometraje_anterior)
+                        VALUES (:id_gasto, :tipo_carburante, :galones, :ppg, :estacion, :km_actual, :km_anterior)
+                    ");
+                    $stmtDet->execute([
+                        ':id_gasto'       => $id,
+                        ':tipo_carburante'=> $this->input['tipo_combustible'] ?? 'Diésel',
+                        ':galones'        => (float)$this->input['galones'],
+                        ':ppg'            => (float)($this->input['precio_por_galon'] ?? 0),
+                        ':estacion'       => $this->input['estacion_servicio'] ?? null,
+                        ':km_actual'      => $this->input['kilometraje_actual'] ?? null,
+                        ':km_anterior'    => $this->input['kilometraje_anterior'] ?? null,
+                    ]);
+                }
+            }
+
+            $this->pdo->commit();
+            return ['success' => true, 'message' => 'Gasto actualizado exitosamente'];
+        } catch (Exception $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
     }
 
     private function eliminarGasto(): array {
@@ -661,7 +698,7 @@ class API {
     // ================================================================
     // CLASIFICACIÓN
     // ================================================================
-    private function handleClasificacion(): array {
+    private function handleClasificacion(array $parts = []): array {
         switch ($this->method) {
             case 'GET':  return $this->listarClasificacion();
             case 'POST': return $this->crearClasificacion();
@@ -746,7 +783,7 @@ class API {
     // ================================================================
     // COMBUSTIBLE (detalle)
     // ================================================================
-    private function handleCombustible(): array {
+    private function handleCombustible(array $parts = []): array {
         if ($this->method !== 'GET') throw new Exception('Método no permitido', 405);
 
         $page   = max(1, (int)($this->params['page'] ?? 1));
@@ -900,7 +937,7 @@ class API {
     // ================================================================
     // PERSONAL
     // ================================================================
-    private function handlePersonal(): array {
+    private function handlePersonal(array $parts = []): array {
         $id = $this->params['id'] ?? null;
         switch ($this->method) {
             case 'GET':    return $id ? $this->obtenerPersonalPorId((int)$id) : $this->listarPersonal();
@@ -943,24 +980,7 @@ class API {
     }
 
     private function crearPersonal(): array {
-        $stmt = $this->pdo->prepare("INSERT INTO global.personal (nombres, apellidos, cargo, telefono, licencia, sueldo, estado) VALUES (:n, :a, :c, :t, :l, :s, :e)");
-        $stmt->execute([
-            ':n' => $this->input['nombres'],
-            ':a' => $this->input['apellidos'],
-            ':c' => $this->input['cargo'] ?? 'Operador',
-            ':t' => $this->input['telefono'] ?? null,
-            ':l' => $this->input['licencia'] ?? null,
-            ':s' => (float)($this->input['sueldo'] ?? 0),
-            ':e' => (int)($this->input['estado'] ?? 1)
-        ]);
-        return ['success' => true, 'message' => 'Personal registrado exitosamente'];
-    }
-
-    private function actualizarPersonal(): array {
-        $id = (int)($this->params['id'] ?? 0);
-        if (!$id) throw new Exception('ID requerido', 400);
-
-        $stmt = $this->pdo->prepare("UPDATE global.personal SET nombres=:n, apellidos=:a, cargo=:c, telefono=:t, licencia=:l, sueldo=:s, estado=:e WHERE id_personal=:id");
+        $stmt = $this->pdo->prepare("INSERT INTO global.personal (nombres, apellidos, cargo, telefono, licencia, sueldo, estado, ci) VALUES (:n, :a, :c, :t, :l, :s, :e, :ci)");
         $stmt->execute([
             ':n' => $this->input['nombres'],
             ':a' => $this->input['apellidos'],
@@ -969,6 +989,25 @@ class API {
             ':l' => $this->input['licencia'] ?? null,
             ':s' => (float)($this->input['sueldo'] ?? 0),
             ':e' => (int)($this->input['estado'] ?? 1),
+            ':ci'=> $this->input['ci'] ?? null
+        ]);
+        return ['success' => true, 'message' => 'Personal registrado exitosamente'];
+    }
+
+    private function actualizarPersonal(): array {
+        $id = (int)($this->params['id'] ?? 0);
+        if (!$id) throw new Exception('ID requerido', 400);
+
+        $stmt = $this->pdo->prepare("UPDATE global.personal SET nombres=:n, apellidos=:a, cargo=:c, telefono=:t, licencia=:l, sueldo=:s, estado=:e, ci=:ci WHERE id_personal=:id");
+        $stmt->execute([
+            ':n' => $this->input['nombres'],
+            ':a' => $this->input['apellidos'],
+            ':c' => $this->input['cargo'] ?? 'Operador',
+            ':t' => $this->input['telefono'] ?? null,
+            ':l' => $this->input['licencia'] ?? null,
+            ':s' => (float)($this->input['sueldo'] ?? 0),
+            ':e' => (int)($this->input['estado'] ?? 1),
+            ':ci'=> $this->input['ci'] ?? null,
             ':id' => $id
         ]);
         return ['success' => true, 'message' => 'Personal actualizado exitosamente'];
@@ -994,8 +1033,7 @@ class API {
             }
 
             // Verificar si ha realizado viajes (Ingresos asociados a cualquier vehículo)
-            // Como no hay histórico directo, buscamos registros en ingresos
-            $stmtI = $this->pdo->prepare("SELECT COUNT(*) FROM global.ingresos WHERE id_vehiculo IN (SELECT id_vehiculo FROM global.vehiculos WHERE id_personal = :id) OR observaciones ILIKE :name");
+            $stmtI = $this->pdo->prepare("SELECT COUNT(*) FROM global.ingresos WHERE id_personal = :id OR conductor_asignado ILIKE :name");
             $stmtI->execute([':id' => $id, ':name' => '%' . $p['apellidos'] . '%']);
             
             if ((int)$stmtI->fetchColumn() > 0) {
@@ -1017,7 +1055,7 @@ class API {
     // ================================================================
     // TRAMOS
     // ================================================================
-    private function handleTramos(): array {
+    private function handleTramos(array $parts = []): array {
         switch ($this->method) {
             case 'GET':  return $this->listarTramos();
             case 'POST': return $this->crearTramo();
@@ -1063,36 +1101,17 @@ class API {
     // ================================================================
     // ALMACÉN
     // ================================================================
-    private function handleAlmacen(): array {
-        // AUTORUN MIGRATION IF TABLE MISSING OR EMPTY
-        try {
-            $this->pdo->exec("CREATE SCHEMA IF NOT EXISTS global;");
-            $q = $this->pdo->query("SELECT COUNT(*) FROM global.inventario");
-            $count = $q ? (int)$q->fetchColumn() : 0;
-            
-            if ($count === 0) {
-                // Forzar carga de datos iniciales
-                $sqlPath = __DIR__ . '/../database/2026-03-31MigrationNewDatabase.sql';
-                if (file_exists($sqlPath)) {
-                    $this->pdo->exec(file_get_contents($sqlPath));
-                }
-            }
-        } catch (Exception $e) {
-            // Si la tabla no existe, fallará el count, así que cargamos el SQL
-            $sqlPath = __DIR__ . '/../database/2026-03-31MigrationNewDatabase.sql';
-            if (file_exists($sqlPath)) {
-                $this->pdo->exec(file_get_contents($sqlPath));
-            }
-        }
-
-        $id = $this->params['id'] ?? null;
+    private function handleAlmacen(array $parts = []): array {
+        $sub = $parts[1] ?? null;
+        $id = is_numeric($sub) ? (int)$sub : null;
 
         switch ($this->method) {
             case 'GET':  
-                if (($parts[1] ?? '') === 'categorias' || ($this->params['sub'] ?? '') === 'categorias') return $this->listarCategoriasAlmacen();
+                if ($sub === 'categorias') return $this->listarCategoriasAlmacen();
+                if ($sub === 'movimientos') return $this->listarMovimientosAlmacen();
                 return $id ? $this->obtenerProductoPorId((int)$id) : $this->listarProductos();
             case 'POST': 
-                if (($parts[1] ?? '') === 'movimientos') return $this->registrarMovimientoAlmacen();
+                if ($sub === 'movimientos' || $sub === 'consumo') return $this->registrarMovimientoAlmacen();
                 return $this->crearProducto();
             case 'PUT':
                 return $this->actualizarProducto();
@@ -1147,7 +1166,6 @@ class API {
         $id = $this->params['id'] ?? null;
         if (!$id) throw new Exception('ID requerido', 400);
 
-        // For simplicity, hard delete. We could soft delete setting estado = 'INACTIVO'
         $stmt = $this->pdo->prepare("DELETE FROM global.inventario WHERE id_inventario = :id");
         $stmt->execute([':id' => (int)$id]);
         return ['success' => true, 'message' => 'Producto eliminado del inventario'];
@@ -1155,40 +1173,90 @@ class API {
 
     private function registrarMovimientoAlmacen(): array {
         $idProd = (int)($this->input['id_producto'] ?? 0);
-        $idVeh = (int)($this->input['id_vehiculo'] ?? 0);
-        $cant = (float)($this->input['cantidad'] ?? 0);
+        $idVeh  = (int)($this->input['id_vehiculo'] ?? 0);
+        $cant   = (int)($this->input['cantidad'] ?? 0);
+        $tipo   = $this->input['tipo_movimiento'] ?? 'CONSUMO'; // CONSUMO o COMPRA
 
-        if (!$idProd || !$idVeh || $cant <= 0) {
-            throw new Exception("Faltan datos obligatorios para el consumo o cantidad inválida", 400);
+        if (!$idProd || $cant <= 0) {
+            throw new Exception("Faltan datos obligatorios para el movimiento", 400);
         }
         
         $this->pdo->beginTransaction();
         try {
-            // Verificar stock
-            $stmt = $this->pdo->prepare("SELECT stock_actual, nombre_producto FROM global.inventario WHERE id_inventario = :id FOR UPDATE");
+            // Obtener datos del producto
+            $stmt = $this->pdo->prepare("SELECT stock_actual, nombre_producto, precio_compra FROM global.inventario WHERE id_inventario = :id FOR UPDATE");
             $stmt->execute([':id' => $idProd]);
             $prod = $stmt->fetch();
             
             if (!$prod) throw new Exception("Producto no encontrado");
-            if ($prod['stock_actual'] < $cant) throw new Exception("Stock insuficiente. Stock actual: " . $prod['stock_actual']);
+            
+            if ($tipo === 'CONSUMO' && $prod['stock_actual'] < $cant) {
+                throw new Exception("Stock insuficiente. Stock actual: " . $prod['stock_actual']);
+            }
 
-            // Crear el registro de movimiento historico (si hay tabla, o simplemente restar, restamos directo para simplicidad si la BD no tiene tabla de movimientos aun)
-            $stmtUpd = $this->pdo->prepare("UPDATE global.inventario SET stock_actual = stock_actual - :c WHERE id_inventario = :id");
-            $stmtUpd->execute([':c' => $cant, ':id' => $idProd]);
+            // Registrar en tabla de movimientos
+            $stmtMov = $this->pdo->prepare("
+                INSERT INTO global.movimientos_inventario 
+                (id_inventario, tipo_movimiento, cantidad, costo_unitario, id_vehiculo, id_personal, motivo, observaciones, fecha_movimiento)
+                VALUES (:idp, :tipo, :cant, :costo, :idv, :idpers, :motivo, :obs, :fecha)
+            ");
+            $stmtMov->execute([
+                ':idp'    => $idProd,
+                ':tipo'   => $tipo,
+                ':cant'   => $cant,
+                ':costo'  => (float)$prod['precio_compra'],
+                ':idv'    => $idVeh ?: null,
+                ':idpers' => (int)($this->input['id_personal'] ?? null) ?: null,
+                ':motivo' => $this->input['motivo'] ?? ($tipo === 'CONSUMO' ? 'Uso en vehículo' : 'Ingreso por compra'),
+                ':obs'    => $this->input['observaciones'] ?? null,
+                ':fecha'  => $this->input['fecha_movimiento'] ?? date('Y-m-d')
+            ]);
 
-            // Se podria guardar el historico o relacion en otra tabla. El requerimiento de Frontend manda esto para registrar un "consumo"
+            // El stock se actualiza automáticamente vía Trigger en DB (según la migración)
+            // Pero si el trigger no está, lo hacemos manual:
+            // $stmtUpd = $this->pdo->prepare("UPDATE global.inventario SET stock_actual = stock_actual " . ($tipo === 'CONSUMO' ? '-' : '+') . " :c WHERE id_inventario = :id");
+            // $stmtUpd->execute([':c' => $cant, ':id' => $idProd]);
 
             $this->pdo->commit();
-            return ['success' => true, 'message' => 'Consumo registrado exitosamente. Se descontó del stock.'];
+            return ['success' => true, 'message' => "Movimiento de $tipo registrado exitosamente."];
         } catch (Exception $e) {
             $this->pdo->rollBack();
             throw $e;
         }
     }
 
-    private function listarCategoriasAlmacen(): array {
-        $stmt = $this->pdo->query("SELECT * FROM global.categorias_almacen ORDER BY nombre");
+    private function listarMovimientosAlmacen(): array {
+        $idVeh = $this->params['id_vehiculo'] ?? null;
+        $sql = "
+            SELECT m.*, i.nombre_producto, i.codigo, v.placa_vehiculo,
+                   p.nombres || ' ' || p.apellidos as personal_nombre
+            FROM global.movimientos_inventario m
+            JOIN global.inventario i ON m.id_inventario = i.id_inventario
+            LEFT JOIN global.vehiculos v ON m.id_vehiculo = v.id_vehiculo
+            LEFT JOIN global.personal p ON m.id_personal = p.id_personal
+        ";
+        $where = [];
+        $params = [];
+        if ($idVeh) {
+            $where[] = "m.id_vehiculo = :idv";
+            $params[':idv'] = (int)$idVeh;
+        }
+        if ($where) $sql .= " WHERE " . implode(" AND ", $where);
+        $sql .= " ORDER BY m.fecha_movimiento DESC, m.id_movimiento DESC";
+        
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
         return ['success' => true, 'data' => $stmt->fetchAll()];
+    }
+
+    private function listarCategoriasAlmacen(): array {
+        // Si no hay tabla de categorías, devolver las únicas de inventario
+        try {
+            $stmt = $this->pdo->query("SELECT DISTINCT categoria as nombre FROM global.inventario ORDER BY categoria");
+            return ['success' => true, 'data' => $stmt->fetchAll()];
+        } catch (Exception $e) {
+            return ['success' => true, 'data' => []];
+        }
     }
 
     private function listarProductos(): array {
@@ -1223,8 +1291,8 @@ class API {
 
     private function crearProducto(): array {
         $stmt = $this->pdo->prepare("
-            INSERT INTO global.inventario (codigo, nombre_producto, categoria, stock_actual, stock_minimo, precio_compra, unidad_medida, marca, estado, id_proveedor)
-            VALUES (:cod, :n, :cat, :can, :sm, :pu, :um, :mar, :est, :idprov)
+            INSERT INTO global.inventario (codigo, nombre_producto, categoria, stock_actual, stock_minimo, precio_compra, unidad_medida, marca, estado, id_proveedor, fecha_ingreso)
+            VALUES (:cod, :n, :cat, :can, :sm, :pu, :um, :mar, :est, :idprov, :fecha)
         ");
         $stmt->execute([
             ':cod'   => $this->input['codigo'],
@@ -1236,7 +1304,8 @@ class API {
             ':um'    => $this->input['unidad_medida'] ?? 'UNIDAD',
             ':mar'   => $this->input['marca'] ?? null,
             ':est'   => $this->input['estado'] ?? 'ACTIVO',
-            ':idprov'=> (int)($this->input['id_proveedor'] ?? null)
+            ':idprov'=> (int)($this->input['id_proveedor'] ?? null) ?: null,
+            ':fecha' => $this->input['fecha_ingreso'] ?? date('Y-m-d')
         ]);
         return ['success' => true, 'message' => 'Producto registrado en inventario'];
     }
@@ -1244,16 +1313,37 @@ class API {
     // ================================================================
     // INGRESOS
     // ================================================================
-    private function handleIngresos(): array {
+    private function handleIngresos(array $parts = []): array {
+        $id = $this->params['id'] ?? null;
         switch ($this->method) {
-            case 'GET':  return $this->listarIngresos();
+            case 'GET':  return $id ? $this->obtenerIngresoPorId((int)$id) : $this->listarIngresos();
             case 'POST': return $this->crearIngreso();
+            case 'PUT':  return $this->actualizarIngreso();
+            case 'DELETE': return $this->eliminarIngreso();
             default: throw new Exception('Método no permitido', 405);
         }
     }
 
+    private function obtenerIngresoPorId(int $id): array {
+        $stmt = $this->pdo->prepare("
+            SELECT i.*, v.placa_vehiculo, v.conductor as vehiculo_conductor
+            FROM global.ingresos i
+            LEFT JOIN global.vehiculos v ON i.id_vehiculo = v.id_vehiculo
+            WHERE i.id_ingreso = :id
+        ");
+        $stmt->execute([':id' => $id]);
+        $data = $stmt->fetch();
+        if (!$data) throw new Exception('Ingreso no encontrado', 404);
+        return ['success' => true, 'data' => $data];
+    }
+
     private function listarIngresos(): array {
-        $stmt = $this->pdo->query("SELECT i.*, v.placa_vehiculo FROM global.ingresos i LEFT JOIN global.vehiculos v ON i.id_vehiculo = v.id_vehiculo ORDER BY fecha_ingreso DESC");
+        $stmt = $this->pdo->query("
+            SELECT i.*, v.placa_vehiculo 
+            FROM global.ingresos i 
+            LEFT JOIN global.vehiculos v ON i.id_vehiculo = v.id_vehiculo 
+            ORDER BY fecha_ingreso DESC, id_ingreso DESC
+        ");
         return ['success' => true, 'data' => $stmt->fetchAll()];
     }
 
@@ -1289,14 +1379,49 @@ class API {
         return ['success' => true, 'message' => 'Ingreso registrado correctamente'];
     }
 
+    private function actualizarIngreso(): array {
+        $id = $this->params['id'] ?? null;
+        if (!$id) throw new Exception('ID requerido', 400);
+
+        $stmt = $this->pdo->prepare("
+            UPDATE global.ingresos SET
+                id_vehiculo = :v, concepto = :c, monto = :m, 
+                fecha_ingreso = :f, observaciones = :o, toneladas = :t, 
+                kilometraje_conducido = :km, conductor_asignado = :cond, id_personal = :idp
+            WHERE id_ingreso = :id
+        ");
+        $stmt->execute([
+            ':id'    => (int)$id,
+            ':v'     => (int)$this->input['id_vehiculo'],
+            ':c'     => $this->input['concepto'],
+            ':m'     => (float)$this->input['monto'],
+            ':f'     => $this->input['fecha_ingreso'],
+            ':o'     => $this->input['observaciones'] ?? null,
+            ':t'     => (float)($this->input['toneladas'] ?? 0),
+            ':km'    => (float)($this->input['kilometraje_conducido'] ?? 0),
+            ':cond'  => $this->input['conductor_asignado'] ?? null,
+            ':idp'   => (int)($this->input['id_personal'] ?? null) ?: null
+        ]);
+        return ['success' => true, 'message' => 'Ingreso actualizado correctamente'];
+    }
+
+    private function eliminarIngreso(): array {
+        $id = $this->params['id'] ?? null;
+        if (!$id) throw new Exception('ID requerido', 400);
+        $stmt = $this->pdo->prepare("DELETE FROM global.ingresos WHERE id_ingreso = :id");
+        $stmt->execute([':id' => (int)$id]);
+        return ['success' => true, 'message' => 'Ingreso eliminado'];
+    }
+
     // ================================================================
     // REPORTES
     // ================================================================
-    private function handleReportes(): array {
-        $type = $this->params['id'] ?? $this->params['type'] ?? 'resumen';
+    private function handleReportes(array $parts = []): array {
+        $type = $parts[1] ?? 'resumen';
         switch ($type) {
             case 'financiero': return $this->getReporteFinanciero();
             case 'almacen':    return $this->getReporteAlmacen();
+            case 'filtro':     return $this->handleFiltroReportes();
             default:           return $this->getReporteResumen();
         }
     }
@@ -1368,6 +1493,13 @@ class API {
 
         // 1. Obtener Gastos (Egresos)
         $whereG = ["g.fecha_gasto BETWEEN :fi AND :ff"];
+        $paramsG = [':fi' => $fecha_inicio, ':ff' => $fecha_fin];
+
+        if (!empty($this->params['id_vehiculo'])) {
+            $whereG[] = "g.id_vehiculo = :vid";
+            $paramsG[':vid'] = (int)$this->params['id_vehiculo'];
+        }
+
         if ($tipo_reporte === 'USUARIOS') {
             $whereG[] = "g.tipo_gasto IN ('Sueldos', 'Viaticos')";
         } elseif ($tipo_reporte === 'UNIDADES') {
@@ -1386,12 +1518,18 @@ class API {
             LEFT JOIN global.vehiculos v ON g.id_vehiculo = v.id_vehiculo
             WHERE $whereG_SQL
         ");
-        $stmtG->execute([':fi' => $fecha_inicio, ':ff' => $fecha_fin]);
+        $stmtG->execute($paramsG);
         $gastos = $stmtG->fetchAll();
 
         // 2. Obtener Ingresos (Solo si NO es reporte de solo GASTOS)
         if ($tipo_reporte !== 'GASTOS') {
             $whereI = ["i.fecha_ingreso BETWEEN :fi AND :ff"];
+            $paramsI = [':fi' => $fecha_inicio, ':ff' => $fecha_fin];
+
+            if (!empty($this->params['id_vehiculo'])) {
+                $whereI[] = "i.id_vehiculo = :vid";
+                $paramsI[':vid'] = (int)$this->params['id_vehiculo'];
+            }
             
             $whereI_SQL = implode(' AND ', $whereI);
             $stmtI = $this->pdo->prepare("
@@ -1404,19 +1542,49 @@ class API {
                 LEFT JOIN global.vehiculos v ON i.id_vehiculo = v.id_vehiculo
                 WHERE $whereI_SQL
             ");
-            $stmtI->execute([':fi' => $fecha_inicio, ':ff' => $fecha_fin]);
+            $stmtI->execute($paramsI);
             $ingresos = $stmtI->fetchAll();
         }
 
-        // Combinar y ordenar por fecha
-        $todo = array_merge($gastos, $ingresos);
+        // 3. Obtener Consumos de Almacén (Egresos)
+        $consumos = [];
+        if ($tipo_reporte === 'TODO' || $tipo_reporte === 'UNIDADES') {
+            $whereA = ["m.tipo_movimiento = 'CONSUMO'", "m.fecha_movimiento BETWEEN :fi AND :ff"];
+            $paramsA = [':fi' => $fecha_inicio, ':ff' => $fecha_fin];
+
+            if (!empty($this->params['id_vehiculo'])) {
+                $whereA[] = "m.id_vehiculo = :vid";
+                $paramsA[':vid'] = (int)$this->params['id_vehiculo'];
+            }
+            $whereA_SQL = implode(' AND ', $whereA);
+
+            $stmtA = $this->pdo->prepare("
+                SELECT 'GASTO' as tipo_registro, m.id_movimiento as id, m.id_movimiento, m.fecha_movimiento as fecha, 
+                       'CONSUMO ALMACÉN: ' || i.nombre_producto as concepto, 
+                       (m.cantidad * m.costo_unitario) as egreso, 0 as ingreso, m.observaciones,
+                       v.placa_vehiculo, m.id_vehiculo, 'Almacen' as tipo_gasto,
+                       FLOOR(m.cantidad) as cantidad, 0 as kilometraje, '' as proveedor,
+                       '' as toneladas, '' as kilometraje_conducido, '' as conductor_asignado
+                FROM global.movimientos_inventario m
+                JOIN global.inventario i ON m.id_inventario = i.id_inventario
+                LEFT JOIN global.vehiculos v ON m.id_vehiculo = v.id_vehiculo
+                WHERE $whereA_SQL
+            ");
+            $stmtA->execute($paramsA);
+            $consumos = $stmtA->fetchAll();
+        }
+
+        // Combinar y ordenar por fecha LIFO
+        $todo = array_merge($gastos, $ingresos, $consumos);
         usort($todo, function($a, $b) {
-            return strtotime($b['fecha']) - strtotime($a['fecha']);
+            $dateDiff = strtotime($b['fecha']) - strtotime($a['fecha']);
+            if ($dateDiff !== 0) return $dateDiff;
+            return $b['id'] - $a['id']; 
         });
 
         // Resumen
         $total_ingresos = array_sum(array_column($ingresos, 'ingreso'));
-        $total_egresos  = array_sum(array_column($gastos, 'egreso'));
+        $total_egresos  = array_sum(array_column($gastos, 'egreso')) + array_sum(array_column($consumos, 'egreso'));
 
         return [
             'success' => true,
@@ -1434,7 +1602,7 @@ class API {
     // ================================================================
     // PROVEEDORES
     // ================================================================
-    private function handleProveedores(): array {
+    private function handleProveedores(array $parts = []): array {
         switch ($this->method) {
             case 'GET':  return ['success' => true, 'data' => $this->query("SELECT * FROM global.proveedores ORDER BY nombre_proveedor")->fetchAll()];
             case 'POST': 
