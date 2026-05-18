@@ -1102,20 +1102,99 @@ class API {
     // ALMACÉN
     // ================================================================
     private function handleAlmacen(array $parts = []): array {
+        // AUTO-MIGRACIÓN (Asegurar que existan las tablas y columnas nuevas)
+        try {
+            $this->pdo->exec("CREATE TABLE IF NOT EXISTS global.lotes (
+                id_lote SERIAL PRIMARY KEY,
+                id_inventario INTEGER REFERENCES global.inventario(id_inventario) ON DELETE CASCADE,
+                codigo_lote VARCHAR(50) NOT NULL,
+                fecha_ingreso DATE DEFAULT CURRENT_DATE,
+                cantidad_inicial DECIMAL(12,2) DEFAULT 0,
+                cantidad_actual DECIMAL(12,2) DEFAULT 0,
+                precio_compra DECIMAL(12,2) DEFAULT 0,
+                estado VARCHAR(20) DEFAULT 'ACTIVO',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )");
+            $this->pdo->exec("ALTER TABLE global.movimientos_inventario ADD COLUMN IF NOT EXISTS id_lote INTEGER REFERENCES global.lotes(id_lote) ON DELETE SET NULL");
+            $this->pdo->exec("ALTER TABLE global.movimientos_inventario ADD COLUMN IF NOT EXISTS cant_pedida DECIMAL(12,2) DEFAULT 0");
+            $this->pdo->exec("ALTER TABLE global.movimientos_inventario ADD COLUMN IF NOT EXISTS nro_doc VARCHAR(50)");
+            
+            // Secuencia para Nro Doc
+            $this->pdo->exec("CREATE SEQUENCE IF NOT EXISTS global.seq_nro_doc START 1001");
+
+            // Tabla de Categorías de Almacén
+            $this->pdo->exec("CREATE TABLE IF NOT EXISTS global.categorias_almacen (
+                id_categoria SERIAL PRIMARY KEY,
+                nombre VARCHAR(100) NOT NULL UNIQUE,
+                descripcion TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )");
+
+            // Corregir Restricción de Tipo de Movimiento (Asegurar que permita INGRESO y CONSUMO)
+            try {
+                $this->pdo->exec("ALTER TABLE global.movimientos_inventario DROP CONSTRAINT IF EXISTS chk_tipo_movimiento");
+                $this->pdo->exec("ALTER TABLE global.movimientos_inventario ADD CONSTRAINT chk_tipo_movimiento CHECK (tipo_movimiento IN ('INGRESO', 'CONSUMO', 'COMPRA', 'ENTRADA', 'SALIDA'))");
+            } catch (Exception $e) {}
+
+            // BACKFILL: Asignar Nro Doc a quienes no tienen
+            $stmt = $this->pdo->query("SELECT id_movimiento FROM global.movimientos_inventario WHERE nro_doc IS NULL OR nro_doc = ''");
+            $toUpdate = $stmt->fetchAll();
+            if ($toUpdate) {
+                foreach ($toUpdate as $row) {
+                    $nextDoc = $this->pdo->query("SELECT nextval('global.seq_nro_doc')")->fetchColumn();
+                    $docStr = "DOC-" . str_pad($nextDoc, 5, '0', STR_PAD_LEFT);
+                    $this->pdo->prepare("UPDATE global.movimientos_inventario SET nro_doc = :doc WHERE id_movimiento = :id")
+                             ->execute([':doc' => $docStr, ':id' => $row['id_movimiento']]);
+                }
+            }
+
+            // BACKFILL: Crear Lotes para productos existentes que no tienen lote en sus movimientos
+            $stmtEx = $this->pdo->query("
+                SELECT m.id_movimiento, m.id_inventario, m.cantidad, m.costo_unitario, m.fecha_movimiento 
+                FROM global.movimientos_inventario m 
+                WHERE m.id_lote IS NULL AND m.tipo_movimiento = 'INGRESO'
+            ");
+            $movsSinLote = $stmtEx->fetchAll();
+            foreach ($movsSinLote as $m) {
+                $codigoLote = "LOTE-" . $m['id_inventario'] . "-" . date('ymd', strtotime($m['fecha_movimiento']));
+                $stmtLote = $this->pdo->prepare("
+                    INSERT INTO global.lotes (id_inventario, codigo_lote, fecha_ingreso, cantidad_inicial, cantidad_actual, precio_compra)
+                    VALUES (:idp, :cod, :fecha, :cant, :cant, :pre)
+                    RETURNING id_lote
+                ");
+                $stmtLote->execute([
+                    ':idp'   => $m['id_inventario'],
+                    ':cod'   => $codigoLote,
+                    ':fecha' => $m['fecha_movimiento'],
+                    ':cant'  => $m['cantidad'],
+                    ':pre'   => $m['costo_unitario']
+                ]);
+                $idLote = $stmtLote->fetchColumn();
+                $this->pdo->prepare("UPDATE global.movimientos_inventario SET id_lote = :idl WHERE id_movimiento = :idm")
+                         ->execute([':idl' => $idLote, ':idm' => $m['id_movimiento']]);
+            }
+
+        } catch (Exception $e) { /* Silencioso */ }
+
         $sub = $parts[1] ?? null;
         $id = is_numeric($sub) ? (int)$sub : null;
 
         switch ($this->method) {
             case 'GET':  
-                if ($sub === 'categorias') return $this->listarCategoriasAlmacen();
+                if ($sub === 'categorias') return $id ? $this->obtenerCategoriaAlmacen((int)$id) : $this->listarCategoriasAlmacen();
                 if ($sub === 'movimientos') return $this->listarMovimientosAlmacen();
+                if ($sub === 'lotes') return $this->listarLotesAlmacen();
                 return $id ? $this->obtenerProductoPorId((int)$id) : $this->listarProductos();
             case 'POST': 
+                if ($sub === 'categorias') return $this->crearCategoriaAlmacen();
                 if ($sub === 'movimientos' || $sub === 'consumo') return $this->registrarMovimientoAlmacen();
                 return $this->crearProducto();
             case 'PUT':
-                return $this->actualizarProducto();
+                if ($sub === 'categorias' && $id) return $this->actualizarCategoriaAlmacen((int)$id);
+                if ($sub === 'lotes' && $id) return $this->actualizarLoteAlmacen((int)$id);
+                return $this->actualizarProducto((int)$id);
             case 'DELETE':
+                if ($sub === 'categorias' && $id) return $this->eliminarCategoriaAlmacen((int)$id);
                 return $this->eliminarProducto();
             default: throw new Exception('Método no permitido', 405);
         }
@@ -1194,11 +1273,37 @@ class API {
                 throw new Exception("Stock insuficiente. Stock actual: " . $prod['stock_actual']);
             }
 
+            // Generar Nro Doc si no viene
+            $nroDoc = $this->input['nro_doc'] ?? '';
+            if (empty($nroDoc)) {
+                $nextDoc = $this->pdo->query("SELECT nextval('global.seq_nro_doc')")->fetchColumn();
+                $nroDoc = "DOC-" . str_pad($nextDoc, 5, '0', STR_PAD_LEFT);
+            }
+
+            // Crear Lote automático si es INGRESO
+            $idLote = (int)($this->input['id_lote'] ?? null) ?: null;
+            if ($tipo === 'INGRESO' && !$idLote) {
+                $codigoLote = "LOTE-" . $idProd . "-" . date('ymd');
+                $stmtLote = $this->pdo->prepare("
+                    INSERT INTO global.lotes (id_inventario, codigo_lote, fecha_ingreso, cantidad_inicial, cantidad_actual, precio_compra)
+                    VALUES (:idp, :cod, :fecha, :cant, :cant, :pre)
+                    RETURNING id_lote
+                ");
+                $stmtLote->execute([
+                    ':idp'   => $idProd,
+                    ':cod'   => $codigoLote,
+                    ':fecha' => $this->input['fecha_movimiento'] ?? date('Y-m-d'),
+                    ':cant'  => $cant,
+                    ':pre'   => (float)$prod['precio_compra']
+                ]);
+                $idLote = $stmtLote->fetchColumn();
+            }
+
             // Registrar en tabla de movimientos
             $stmtMov = $this->pdo->prepare("
                 INSERT INTO global.movimientos_inventario 
-                (id_inventario, tipo_movimiento, cantidad, costo_unitario, id_vehiculo, id_personal, motivo, observaciones, fecha_movimiento)
-                VALUES (:idp, :tipo, :cant, :costo, :idv, :idpers, :motivo, :obs, :fecha)
+                (id_inventario, tipo_movimiento, cantidad, costo_unitario, id_vehiculo, id_personal, motivo, observaciones, fecha_movimiento, nro_doc, id_lote)
+                VALUES (:idp, :tipo, :cant, :costo, :idv, :idpers, :motivo, :obs, :fecha, :doc, :idl)
             ");
             $stmtMov->execute([
                 ':idp'    => $idProd,
@@ -1209,7 +1314,9 @@ class API {
                 ':idpers' => (int)($this->input['id_personal'] ?? null) ?: null,
                 ':motivo' => $this->input['motivo'] ?? ($tipo === 'CONSUMO' ? 'Uso en vehículo' : 'Ingreso por compra'),
                 ':obs'    => $this->input['observaciones'] ?? null,
-                ':fecha'  => $this->input['fecha_movimiento'] ?? date('Y-m-d')
+                ':fecha'  => $this->input['fecha_movimiento'] ?? date('Y-m-d'),
+                ':doc'    => $nroDoc,
+                ':idl'    => $idLote
             ]);
 
             // El stock se actualiza automáticamente vía Trigger en DB (según la migración)
@@ -1229,17 +1336,27 @@ class API {
         $idVeh = $this->params['id_vehiculo'] ?? null;
         $sql = "
             SELECT m.*, i.nombre_producto, i.codigo, v.placa_vehiculo,
-                   p.nombres || ' ' || p.apellidos as personal_nombre
+                   p.nombres || ' ' || p.apellidos as personal_nombre,
+                   l.codigo_lote as lote_nombre
             FROM global.movimientos_inventario m
             JOIN global.inventario i ON m.id_inventario = i.id_inventario
             LEFT JOIN global.vehiculos v ON m.id_vehiculo = v.id_vehiculo
             LEFT JOIN global.personal p ON m.id_personal = p.id_personal
+            LEFT JOIN global.lotes l ON m.id_lote = l.id_lote
         ";
         $where = [];
         $params = [];
         if ($idVeh) {
             $where[] = "m.id_vehiculo = :idv";
             $params[':idv'] = (int)$idVeh;
+        }
+        if (!empty($this->params['fecha_inicio'])) {
+            $where[] = "m.fecha_movimiento >= :f1";
+            $params[':f1'] = $this->params['fecha_inicio'];
+        }
+        if (!empty($this->params['fecha_fin'])) {
+            $where[] = "m.fecha_movimiento <= :f2";
+            $params[':f2'] = $this->params['fecha_fin'];
         }
         if ($where) $sql .= " WHERE " . implode(" AND ", $where);
         $sql .= " ORDER BY m.fecha_movimiento DESC, m.id_movimiento DESC";
@@ -1249,14 +1366,110 @@ class API {
         return ['success' => true, 'data' => $stmt->fetchAll()];
     }
 
-    private function listarCategoriasAlmacen(): array {
-        // Si no hay tabla de categorías, devolver las únicas de inventario
-        try {
-            $stmt = $this->pdo->query("SELECT DISTINCT categoria as nombre FROM global.inventario ORDER BY categoria");
-            return ['success' => true, 'data' => $stmt->fetchAll()];
-        } catch (Exception $e) {
-            return ['success' => true, 'data' => []];
+    private function listarLotesAlmacen(): array {
+        $idProd = $this->params['id_producto'] ?? null;
+        $sql = "
+            SELECT l.*, i.nombre_producto, i.codigo as producto_codigo
+            FROM global.lotes l
+            JOIN global.inventario i ON l.id_inventario = i.id_inventario
+        ";
+        $where = [];
+        $params = [];
+        if ($idProd) {
+            $where[] = "l.id_inventario = :idp";
+            $params[':idp'] = (int)$idProd;
         }
+        if (!empty($this->params['fecha_inicio'])) {
+            $where[] = "l.fecha_ingreso >= :f1";
+            $params[':f1'] = $this->params['fecha_inicio'];
+        }
+        if (!empty($this->params['fecha_fin'])) {
+            $where[] = "l.fecha_ingreso <= :f2";
+            $params[':f2'] = $this->params['fecha_fin'];
+        }
+        if ($where) $sql .= " WHERE " . implode(" AND ", $where);
+        $sql .= " ORDER BY l.fecha_ingreso DESC";
+        
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        return ['success' => true, 'data' => $stmt->fetchAll()];
+    }
+
+    private function actualizarLoteAlmacen(int $id): array {
+        $sql = "
+            UPDATE global.lotes 
+            SET codigo_lote = :cod, 
+                cantidad_actual = :cant, 
+                precio_compra = :pre, 
+                estado = :est
+            WHERE id_lote = :id
+        ";
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute([
+            ':cod'  => $this->input['codigo_lote'] ?? '',
+            ':cant' => (float)($this->input['cantidad_actual'] ?? 0),
+            ':pre'  => (float)($this->input['precio_compra'] ?? 0),
+            ':est'  => $this->input['estado'] ?? 'ACTIVO',
+            ':id'   => $id
+        ]);
+        return ['success' => true, 'message' => 'Lote actualizado correctamente'];
+    }
+
+    private function listarCategoriasAlmacen(): array {
+        $stmt = $this->pdo->query("SELECT * FROM global.categorias_almacen ORDER BY nombre");
+        return ['success' => true, 'data' => $stmt->fetchAll()];
+    }
+
+    private function obtenerCategoriaAlmacen(int $id): array {
+        $stmt = $this->pdo->prepare("SELECT * FROM global.categorias_almacen WHERE id_categoria = :id");
+        $stmt->execute([':id' => $id]);
+        $data = $stmt->fetch();
+        if (!$data) throw new Exception('Categoría no encontrada', 404);
+        return ['success' => true, 'data' => $data];
+    }
+
+    private function crearCategoriaAlmacen(): array {
+        $nombre = trim($this->input['nombre'] ?? '');
+        if (!$nombre) throw new Exception('El nombre de la categoría es requerido', 400);
+
+        $stmt = $this->pdo->prepare("INSERT INTO global.categorias_almacen (nombre, descripcion) VALUES (:n, :d)");
+        $stmt->execute([
+            ':n' => $nombre,
+            ':d' => $this->input['descripcion'] ?? null
+        ]);
+        return ['success' => true, 'message' => 'Categoría creada exitosamente'];
+    }
+
+    private function actualizarCategoriaAlmacen(int $id): array {
+        $nombre = trim($this->input['nombre'] ?? '');
+        if (!$nombre) throw new Exception('El nombre de la categoría es requerido', 400);
+
+        $stmt = $this->pdo->prepare("UPDATE global.categorias_almacen SET nombre = :n, descripcion = :d WHERE id_categoria = :id");
+        $stmt->execute([
+            ':n' => $nombre,
+            ':d' => $this->input['descripcion'] ?? null,
+            ':id' => $id
+        ]);
+        return ['success' => true, 'message' => 'Categoría actualizada'];
+    }
+
+    private function eliminarCategoriaAlmacen(int $id): array {
+        // Verificar si hay productos usando esta categoría
+        // (Nota: como usamos strings en inventario, deberíamos verificar el nombre actual)
+        $stmtCat = $this->pdo->prepare("SELECT nombre FROM global.categorias_almacen WHERE id_categoria = :id");
+        $stmtCat->execute([':id' => $id]);
+        $cat = $stmtCat->fetch();
+        if (!$cat) throw new Exception('Categoría no encontrada', 404);
+
+        $stmtCheck = $this->pdo->prepare("SELECT COUNT(*) FROM global.inventario WHERE categoria = :cat");
+        $stmtCheck->execute([':cat' => $cat['nombre']]);
+        if ((int)$stmtCheck->fetchColumn() > 0) {
+            throw new Exception('No se puede eliminar la categoría porque tiene productos asociados', 400);
+        }
+
+        $stmt = $this->pdo->prepare("DELETE FROM global.categorias_almacen WHERE id_categoria = :id");
+        $stmt->execute([':id' => $id]);
+        return ['success' => true, 'message' => 'Categoría eliminada'];
     }
 
     private function listarProductos(): array {
@@ -1290,24 +1503,73 @@ class API {
     }
 
     private function crearProducto(): array {
-        $stmt = $this->pdo->prepare("
-            INSERT INTO global.inventario (codigo, nombre_producto, categoria, stock_actual, stock_minimo, precio_compra, unidad_medida, marca, estado, id_proveedor, fecha_ingreso)
-            VALUES (:cod, :n, :cat, :can, :sm, :pu, :um, :mar, :est, :idprov, :fecha)
-        ");
-        $stmt->execute([
-            ':cod'   => $this->input['codigo'],
-            ':n'     => $this->input['nombre'],
-            ':cat'   => $this->input['categoria'],
-            ':can'   => (float)$this->input['cantidad'],
-            ':sm'    => (float)($this->input['stock_minimo'] ?? 0),
-            ':pu'    => (float)($this->input['precio_unitario'] ?? 0),
-            ':um'    => $this->input['unidad_medida'] ?? 'UNIDAD',
-            ':mar'   => $this->input['marca'] ?? null,
-            ':est'   => $this->input['estado'] ?? 'ACTIVO',
-            ':idprov'=> (int)($this->input['id_proveedor'] ?? null) ?: null,
-            ':fecha' => $this->input['fecha_ingreso'] ?? date('Y-m-d')
-        ]);
-        return ['success' => true, 'message' => 'Producto registrado en inventario'];
+        $this->pdo->beginTransaction();
+        try {
+            $stmt = $this->pdo->prepare("
+                INSERT INTO global.inventario (codigo, nombre_producto, categoria, stock_actual, stock_minimo, precio_compra, unidad_medida, marca, estado, id_proveedor, fecha_ingreso)
+                VALUES (:cod, :n, :cat, :can, :sm, :pu, :um, :mar, :est, :idprov, :fecha)
+                RETURNING id_inventario
+            ");
+            $stmt->execute([
+                ':cod'    => $this->input['codigo'],
+                ':n'      => $this->input['nombre'],
+                ':cat'    => $this->input['categoria'],
+                ':can'    => $this->input['cantidad'] ?? 0,
+                ':sm'     => $this->input['stock_minimo'] ?? 0,
+                ':pu'     => $this->input['precio_unitario'] ?? 0,
+                ':um'     => $this->input['unidad_medida'] ?? 'Unidad',
+                ':mar'    => $this->input['marca'] ?? null,
+                ':est'    => $this->input['estado'] ?? 'ACTIVO',
+                ':idprov' => (int)($this->input['id_proveedor'] ?? null) ?: null,
+                ':fecha'  => $this->input['fecha_ingreso'] ?? date('Y-m-d')
+            ]);
+            $idProd = $stmt->fetchColumn();
+
+            // Si tiene stock inicial, crear movimiento y lote
+            $cant = (float)($this->input['cantidad'] ?? 0);
+            if ($cant > 0) {
+                // Nro Doc Automático
+                $nextDoc = $this->pdo->query("SELECT nextval('global.seq_nro_doc')")->fetchColumn();
+                $nroDoc = "DOC-" . str_pad($nextDoc, 5, '0', STR_PAD_LEFT);
+
+                // Lote Automático
+                $codigoLote = "LOTE-" . $idProd . "-" . date('ymd');
+                $stmtLote = $this->pdo->prepare("
+                    INSERT INTO global.lotes (id_inventario, codigo_lote, fecha_ingreso, cantidad_inicial, cantidad_actual, precio_compra)
+                    VALUES (:idp, :cod, :fecha, :cant, :cant, :pre)
+                    RETURNING id_lote
+                ");
+                $stmtLote->execute([
+                    ':idp'   => $idProd,
+                    ':cod'   => $codigoLote,
+                    ':fecha' => date('Y-m-d'),
+                    ':cant'  => $cant,
+                    ':pre'   => (float)($this->input['precio_unitario'] ?? 0)
+                ]);
+                $idLote = $stmtLote->fetchColumn();
+
+                // Movimiento
+                $stmtMov = $this->pdo->prepare("
+                    INSERT INTO global.movimientos_inventario 
+                    (id_inventario, tipo_movimiento, cantidad, costo_unitario, motivo, fecha_movimiento, nro_doc, id_lote)
+                    VALUES (:idp, 'INGRESO', :cant, :costo, 'Carga Inicial', :fecha, :doc, :idl)
+                ");
+                $stmtMov->execute([
+                    ':idp'   => $idProd,
+                    ':cant'  => $cant,
+                    ':costo' => (float)($this->input['precio_unitario'] ?? 0),
+                    ':fecha' => date('Y-m-d'),
+                    ':doc'   => $nroDoc,
+                    ':idl'   => $idLote
+                ]);
+            }
+
+            $this->pdo->commit();
+            return ['success' => true, 'id' => $idProd, 'message' => 'Producto registrado con éxito'];
+        } catch (Exception $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
     }
 
     // ================================================================
